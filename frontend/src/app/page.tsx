@@ -48,12 +48,18 @@ type LabelResult = {
 
 type ResultResponse = {
   imageId: string;
-  status: string;
-  objectKey: string;
-  imageUrl: string;
-  labels: LabelResult[];
+  bucket?: string;
+  status?: string;
+  objectKey?: string;
+  imageUrl?: string;
+  labels?: LabelResult[];
   faces?: FaceResult[];
   createdAt?: string;
+};
+
+type PastUploadsResponse = {
+  items?: ResultResponse[];
+  count?: number;
 };
 
 type UploadUrlResponse = {
@@ -78,7 +84,10 @@ type BoundingBoxLabel = {
   labelIndex: number;
 };
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL;
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ||
+  process.env.NEXT_PUBLIC_API_URL ||
+  "https://6qund1fwc8.execute-api.us-east-1.amazonaws.com";
 
 const labelColors = [
   "border-emerald-400",
@@ -230,11 +239,41 @@ function getFaceBoundingBoxes(faces: FaceResult[] = []): BoundingBoxLabel[] {
   });
 }
 
+function formatUploadDate(value?: string) {
+  if (!value) {
+    return "Unknown date";
+  }
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat("en", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function getTopLabels(labels: LabelResult[] = []) {
+  return labels
+    .map((label) => ({
+      name: getLabelName(label),
+      confidence: getConfidence(label),
+    }))
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, 3);
+}
+
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("upload");
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [result, setResult] = useState<ResultResponse | null>(null);
+  const [pastUploads, setPastUploads] = useState<ResultResponse[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyMessage, setHistoryMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [debugInfo, setDebugInfo] = useState("");
@@ -286,7 +325,7 @@ export default function HomePage() {
     for (let attempt = 1; attempt <= 6; attempt++) {
       setMessage(`Analyzing image... ${attempt}/6`);
 
-      const resultResponse = await fetch(`${API_URL}/results/${imageId}`, {
+      const resultResponse = await fetch(`${API_BASE_URL}/results/${imageId}`, {
         method: "GET",
       });
 
@@ -304,10 +343,52 @@ export default function HomePage() {
     throw new Error("Result not ready yet. Please try again after a few seconds.");
   }
 
+  async function fetchPastUploads() {
+    try {
+      setHistoryLoading(true);
+      setHistoryMessage("");
+
+      const response = await fetch(`${API_BASE_URL}/results`, {
+        method: "GET",
+      });
+
+      const data = (await response.json()) as PastUploadsResponse;
+
+      if (!response.ok) {
+        throw new Error(`Failed to load past uploads. Status: ${response.status}`);
+      }
+
+      setPastUploads(Array.isArray(data.items) ? data.items : []);
+    } catch (error) {
+      console.error(error);
+      setPastUploads([]);
+      setHistoryMessage(
+        error instanceof Error ? error.message : "Failed to load past uploads."
+      );
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  function handleTabChange(tab: ActiveTab) {
+    setActiveTab(tab);
+
+    if (tab === "past") {
+      fetchPastUploads();
+    }
+  }
+
+  function handleViewPastUpload(item: ResultResponse) {
+    setResult(item);
+    setMessage("");
+    setDebugInfo("");
+    setActiveTab("upload");
+  }
+
   async function handleUpload() {
-    if (!API_URL) {
+    if (!API_BASE_URL) {
       setMessage(
-        "NEXT_PUBLIC_API_URL is missing. Check .env.local and restart npm run dev."
+        "API base URL is missing. Check .env.local and restart npm run dev."
       );
       return;
     }
@@ -330,7 +411,7 @@ export default function HomePage() {
 
       setMessage("Preparing secure upload...");
 
-      const uploadUrlResponse = await fetch(`${API_URL}/upload-url`, {
+      const uploadUrlResponse = await fetch(`${API_BASE_URL}/upload-url`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -379,7 +460,7 @@ export default function HomePage() {
 
       console.log(
         "labels with instances",
-        finalResult.labels.filter(
+        (finalResult.labels || []).filter(
           (label) => (label.Instances || label.instances || []).length > 0
         )
       );
@@ -401,7 +482,7 @@ export default function HomePage() {
     () =>
       result
         ? [
-            ...getBoundingBoxLabels(result.labels),
+            ...getBoundingBoxLabels(result.labels || []),
             ...getFaceBoundingBoxes(result.faces),
           ]
         : [],
@@ -411,7 +492,7 @@ export default function HomePage() {
   const generalLabels = useMemo(() => {
     if (!result) return [];
 
-    return result.labels.filter(
+    return (result.labels || []).filter(
       (label) => !(label.Instances || label.instances || []).some(hasBoundingBox)
     );
   }, [result]);
@@ -426,7 +507,7 @@ export default function HomePage() {
         <nav className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6">
           <button
             type="button"
-            onClick={() => setActiveTab("upload")}
+            onClick={() => handleTabChange("upload")}
             className="text-left text-sm font-semibold tracking-tight text-white"
           >
             Image Labels Generator
@@ -440,7 +521,7 @@ export default function HomePage() {
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setActiveTab(item.id as ActiveTab)}
+                onClick={() => handleTabChange(item.id as ActiveTab)}
                 className={`rounded-full px-4 py-2 transition ${
                   activeTab === item.id
                     ? "bg-white text-black"
@@ -585,11 +666,17 @@ export default function HomePage() {
                   <div className="space-y-4">
                     <div className="text-center">
                       <div className="relative inline-block w-full overflow-hidden rounded-2xl border border-zinc-800 bg-black">
-                        <img
-                          src={result.imageUrl}
-                          alt="Analyzed image"
-                          className="block h-auto w-full object-contain"
-                        />
+                        {result.imageUrl ? (
+                          <img
+                            src={result.imageUrl}
+                            alt="Analyzed image"
+                            className="block h-auto w-full object-contain"
+                          />
+                        ) : (
+                          <div className="flex h-80 items-center justify-center px-8 text-center text-sm text-zinc-600">
+                            Image preview is unavailable for this result.
+                          </div>
+                        )}
 
                         {boundingBoxes.map((item, index) => {
                           const color =
@@ -640,9 +727,9 @@ export default function HomePage() {
                         Detected Labels
                       </h3>
 
-                      {result.labels.length > 0 ? (
+                      {(result.labels || []).length > 0 ? (
                         <div className="mt-4 space-y-3">
-                          {result.labels.map((label) => {
+                          {(result.labels || []).map((label) => {
                             const confidence = getConfidence(label);
                             const type = getLabelType(label);
 
@@ -690,17 +777,145 @@ export default function HomePage() {
             )}
           </div>
         ) : (
-          <section className="mt-10 rounded-2xl border border-zinc-800 bg-zinc-950 p-10 text-center">
-            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-zinc-800 bg-black text-zinc-500">
-              -
+          <section className="mt-10 rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:p-6">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <h2 className="text-xl font-semibold tracking-tight">
+                  Past Uploads
+                </h2>
+                <p className="mt-1 text-sm text-zinc-500">
+                  Analyzed images stored in DynamoDB.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={fetchPastUploads}
+                aria-disabled={historyLoading}
+                className={`inline-flex h-10 items-center justify-center rounded-xl border px-4 text-sm font-medium transition ${
+                  historyLoading
+                    ? "cursor-not-allowed border-zinc-800 text-zinc-600"
+                    : "border-zinc-700 text-zinc-200 hover:border-zinc-500 hover:bg-neutral-950"
+                }`}
+              >
+                {historyLoading ? "Refreshing..." : "Refresh"}
+              </button>
             </div>
-            <h2 className="mt-5 text-xl font-semibold tracking-tight">
-              No past uploads yet
-            </h2>
-            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-zinc-500">
-              Your analyzed images will appear here after DynamoDB history is
-              connected.
-            </p>
+
+            {historyMessage && (
+              <p className="mt-5 rounded-xl border border-red-900/60 bg-red-950/30 px-4 py-3 text-sm text-red-200">
+                {historyMessage}
+              </p>
+            )}
+
+            {historyLoading && pastUploads.length === 0 ? (
+              <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {[0, 1, 2].map((item) => (
+                  <div
+                    key={item}
+                    className="h-80 animate-pulse rounded-2xl border border-zinc-800 bg-neutral-950"
+                  />
+                ))}
+              </div>
+            ) : pastUploads.length === 0 ? (
+              <div className="py-14 text-center">
+                <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-zinc-800 bg-black text-zinc-500">
+                  -
+                </div>
+                <h3 className="mt-5 text-xl font-semibold tracking-tight">
+                  No past uploads yet
+                </h3>
+                <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-zinc-500">
+                  Your analyzed images will appear here after DynamoDB history
+                  is connected.
+                </p>
+              </div>
+            ) : (
+              <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {pastUploads.map((item) => {
+                  const labels = item.labels || [];
+                  const faces = item.faces || [];
+                  const topLabels = getTopLabels(labels);
+
+                  return (
+                    <article
+                      key={item.imageId}
+                      className="overflow-hidden rounded-2xl border border-zinc-800 bg-neutral-950"
+                    >
+                      <div className="flex h-48 items-center justify-center border-b border-zinc-800 bg-black">
+                        {item.imageUrl ? (
+                          <img
+                            src={item.imageUrl}
+                            alt={item.imageId}
+                            className="h-full w-full object-contain"
+                          />
+                        ) : (
+                          <span className="px-6 text-center text-sm text-zinc-600">
+                            Image unavailable
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="space-y-4 p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-zinc-100">
+                              {item.imageId}
+                            </p>
+                            <p className="mt-1 text-xs text-zinc-500">
+                              {formatUploadDate(item.createdAt)}
+                            </p>
+                          </div>
+                          <span className="shrink-0 rounded-full border border-emerald-900/70 bg-emerald-950/30 px-2.5 py-1 text-xs font-medium text-emerald-300">
+                            {item.status || "UNKNOWN"}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          {topLabels.length > 0 ? (
+                            topLabels.map((label) => (
+                              <span
+                                key={`${item.imageId}-${label.name}`}
+                                className="rounded-full border border-zinc-800 bg-black px-2.5 py-1 text-xs text-zinc-300"
+                              >
+                                {label.name} {label.confidence.toFixed(1)}%
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-sm text-zinc-600">
+                              No labels
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3 text-sm">
+                          <div className="rounded-xl border border-zinc-800 bg-black p-3">
+                            <p className="text-xs text-zinc-500">Labels</p>
+                            <p className="mt-1 font-semibold text-zinc-100">
+                              {labels.length}
+                            </p>
+                          </div>
+                          <div className="rounded-xl border border-zinc-800 bg-black p-3">
+                            <p className="text-xs text-zinc-500">Faces</p>
+                            <p className="mt-1 font-semibold text-zinc-100">
+                              {faces.length}
+                            </p>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => handleViewPastUpload(item)}
+                          className="inline-flex h-10 w-full items-center justify-center rounded-xl bg-white px-4 text-sm font-semibold text-black transition hover:bg-zinc-200"
+                        >
+                          View Result
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </section>
         )}
       </section>
