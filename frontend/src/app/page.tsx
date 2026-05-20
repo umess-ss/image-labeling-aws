@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 
 type LabelResult = {
   name: string;
@@ -41,6 +42,7 @@ export default function HomePage() {
   const [message, setMessage] = useState("");
   const [activeStep, setActiveStep] = useState(-1);
   const [debugInfo, setDebugInfo] = useState("");
+  const router = useRouter();
 
   useEffect(() => {
     setMounted(true);
@@ -181,6 +183,8 @@ export default function HomePage() {
       setResult(finalResult);
       setActiveStep(4);
       setMessage("Image labels generated successfully.");
+
+      router.push(`/results/${encodeURIComponent(uploadData.imageId)}`);
     } catch (error) {
       console.error(error);
       setMessage(
