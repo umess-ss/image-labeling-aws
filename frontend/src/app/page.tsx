@@ -7,11 +7,32 @@ type BoundingBox = {
   Top?: number;
   Width?: number;
   Height?: number;
+  left?: number;
+  top?: number;
+  width?: number;
+  height?: number;
 };
 
 type LabelInstance = {
   BoundingBox?: BoundingBox;
+  boundingBox?: BoundingBox;
   Confidence?: number | string;
+  confidence?: number | string;
+};
+
+type LabelCategory =
+  | string
+  | {
+  Name?: string;
+  name?: string;
+};
+
+type FaceResult = {
+  name?: string;
+  confidence?: number | string;
+  Confidence?: number | string;
+  boundingBox?: BoundingBox;
+  BoundingBox?: BoundingBox;
 };
 
 type LabelResult = {
@@ -20,7 +41,9 @@ type LabelResult = {
   confidence?: string;
   Confidence?: number | string;
   Instances?: LabelInstance[];
-  Categories?: { Name?: string }[];
+  instances?: LabelInstance[];
+  Categories?: LabelCategory[];
+  categories?: LabelCategory[];
 };
 
 type ResultResponse = {
@@ -29,6 +52,7 @@ type ResultResponse = {
   objectKey: string;
   imageUrl: string;
   labels: LabelResult[];
+  faces?: FaceResult[];
   createdAt?: string;
 };
 
@@ -42,9 +66,15 @@ type UploadUrlResponse = {
 type ActiveTab = "upload" | "past";
 type LabelType = "Object" | "Person" | "Scene" | "General";
 type BoundingBoxLabel = {
+  id: string;
   name: string;
   confidence: number;
-  box: Required<BoundingBox>;
+  box: {
+    Left: number;
+    Top: number;
+    Width: number;
+    Height: number;
+  };
   labelIndex: number;
 };
 
@@ -78,17 +108,35 @@ function getConfidence(label: LabelResult) {
   return Math.min(Math.max(numberValue, 0), 100);
 }
 
+function getInstanceConfidence(
+  instance: LabelInstance,
+  fallback: number | string | undefined
+) {
+  const value = instance.Confidence ?? instance.confidence ?? fallback ?? 0;
+  const numberValue = Number(value);
+
+  if (!Number.isFinite(numberValue)) {
+    return 0;
+  }
+
+  return Math.min(Math.max(numberValue, 0), 100);
+}
+
 function getLabelType(label: LabelResult): LabelType {
   const name = getLabelName(label).toLowerCase();
-  const categoryNames = label.Categories?.map((category) =>
-    category.Name?.toLowerCase()
-  ).filter((category): category is string => Boolean(category));
+  const categoryNames = (label.Categories || label.categories || [])
+    .map((category) =>
+      typeof category === "string"
+        ? category.toLowerCase()
+        : (category.Name || category.name)?.toLowerCase()
+    )
+    .filter((category): category is string => Boolean(category));
 
   if (name === "person" || categoryNames?.includes("person")) {
     return "Person";
   }
 
-  if (label.Instances?.some((instance) => instance.BoundingBox)) {
+  if ((label.Instances || label.instances || []).some(hasBoundingBox)) {
     return "Object";
   }
 
@@ -103,28 +151,83 @@ function getLabelType(label: LabelResult): LabelType {
   return "General";
 }
 
-function hasBoundingBox(instance: LabelInstance) {
-  const box = instance.BoundingBox;
+function normalizeBoundingBox(box?: BoundingBox) {
+  const left = box?.Left ?? box?.left;
+  const top = box?.Top ?? box?.top;
+  const width = box?.Width ?? box?.width;
+  const height = box?.Height ?? box?.height;
 
-  return (
-    typeof box?.Left === "number" &&
-    typeof box.Top === "number" &&
-    typeof box.Width === "number" &&
-    typeof box.Height === "number"
-  );
+  if (
+    typeof left !== "number" ||
+    typeof top !== "number" ||
+    typeof width !== "number" ||
+    typeof height !== "number"
+  ) {
+    return null;
+  }
+
+  return {
+    Left: left,
+    Top: top,
+    Width: width,
+    Height: height,
+  };
+}
+
+function getInstanceBoundingBox(instance: LabelInstance) {
+  return normalizeBoundingBox(instance.BoundingBox || instance.boundingBox);
+}
+
+function hasBoundingBox(instance: LabelInstance) {
+  return Boolean(getInstanceBoundingBox(instance));
 }
 
 function getBoundingBoxLabels(labels: LabelResult[]): BoundingBoxLabel[] {
-  return labels.flatMap((label, labelIndex) =>
-    (label.Instances || []).filter(hasBoundingBox).map((instance) => ({
-      name: getLabelName(label),
-      confidence: getConfidence({
-        confidence: String(instance.Confidence ?? label.Confidence ?? label.confidence ?? 0),
-      }),
-      box: instance.BoundingBox as Required<BoundingBox>,
-      labelIndex,
-    }))
-  );
+  return labels.flatMap((label, labelIndex) => {
+    const instances = label.Instances || label.instances || [];
+    const name = getLabelName(label);
+    const labelConfidence = label.Confidence ?? label.confidence ?? 0;
+
+    return instances.flatMap((instance, instanceIndex) => {
+      const box = getInstanceBoundingBox(instance);
+
+      if (!box) {
+        return [];
+      }
+
+      return {
+        id: `${name}-${labelIndex}-${instanceIndex}`,
+        name,
+        confidence: getInstanceConfidence(instance, labelConfidence),
+        box,
+        labelIndex,
+      };
+    });
+  });
+}
+
+function getFaceBoundingBoxes(faces: FaceResult[] = []): BoundingBoxLabel[] {
+  return faces.flatMap((face, faceIndex) => {
+    const box = normalizeBoundingBox(face.BoundingBox || face.boundingBox);
+
+    if (!box) {
+      return [];
+    }
+
+    return {
+      id: `${face.name || "Face"}-${faceIndex}`,
+      name: face.name || `Face ${faceIndex + 1}`,
+      confidence: getInstanceConfidence(
+        {
+          Confidence: face.Confidence,
+          confidence: face.confidence,
+        },
+        0
+      ),
+      box,
+      labelIndex: faceIndex + 100,
+    };
+  });
 }
 
 export default function HomePage() {
@@ -274,6 +377,14 @@ export default function HomePage() {
 
       const finalResult = await getResultWithRetry(uploadData.imageId);
 
+      console.log(
+        "labels with instances",
+        finalResult.labels.filter(
+          (label) => (label.Instances || label.instances || []).length > 0
+        )
+      );
+      console.log("faces with bounding boxes", finalResult.faces || []);
+
       setResult(finalResult);
       setMessage("Image analyzed successfully.");
     } catch (error) {
@@ -287,7 +398,13 @@ export default function HomePage() {
   }
 
   const boundingBoxes = useMemo(
-    () => (result ? getBoundingBoxLabels(result.labels) : []),
+    () =>
+      result
+        ? [
+            ...getBoundingBoxLabels(result.labels),
+            ...getFaceBoundingBoxes(result.faces),
+          ]
+        : [],
     [result]
   );
 
@@ -295,12 +412,13 @@ export default function HomePage() {
     if (!result) return [];
 
     return result.labels.filter(
-      (label) => !label.Instances?.some(hasBoundingBox)
+      (label) => !(label.Instances || label.instances || []).some(hasBoundingBox)
     );
   }, [result]);
 
   const isError = Boolean(message && !loading && !result);
   const buttonLabel = loading ? "Analyzing Image..." : "Analyze Image";
+  const isAnalyzeDisabled = loading || !file;
 
   return (
     <main className="min-h-screen bg-black text-white">
@@ -406,9 +524,16 @@ export default function HomePage() {
 
               <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
                 <button
-                  onClick={handleUpload}
-                  disabled={loading || !file}
-                  className="inline-flex h-12 items-center justify-center rounded-xl bg-white px-6 text-sm font-semibold text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-500"
+                  onClick={() => {
+                    if (isAnalyzeDisabled) return;
+                    handleUpload();
+                  }}
+                  aria-disabled={isAnalyzeDisabled}
+                  className={`inline-flex h-12 items-center justify-center rounded-xl px-6 text-sm font-semibold transition ${
+                    isAnalyzeDisabled
+                      ? "cursor-not-allowed bg-zinc-800 text-zinc-500"
+                      : "bg-white text-black hover:bg-zinc-200"
+                  }`}
                 >
                   {buttonLabel}
                 </button>
