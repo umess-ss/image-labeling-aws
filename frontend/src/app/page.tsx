@@ -23,9 +23,9 @@ type LabelInstance = {
 type LabelCategory =
   | string
   | {
-  Name?: string;
-  name?: string;
-};
+      Name?: string;
+      name?: string;
+    };
 
 type FaceResult = {
   name?: string;
@@ -52,6 +52,7 @@ type ResultResponse = {
   status?: string;
   objectKey?: string;
   imageUrl?: string;
+  presignedImageUrl?: string;
   labels?: LabelResult[];
   faces?: FaceResult[];
   createdAt?: string;
@@ -266,11 +267,99 @@ function getTopLabels(labels: LabelResult[] = []) {
     .slice(0, 3);
 }
 
+function getDisplayImageUrl(item?: ResultResponse | null) {
+  return item?.presignedImageUrl || item?.imageUrl || "";
+}
+
+function PastUploadCard({
+  item,
+  onViewResult,
+}: {
+  item: ResultResponse;
+  onViewResult: (item: ResultResponse) => void;
+}) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const imageUrl = getDisplayImageUrl(item);
+  const labels = item.labels || [];
+  const faces = item.faces || [];
+  const topLabels = getTopLabels(labels);
+
+  return (
+    <article className="overflow-hidden rounded-2xl border border-zinc-800 bg-neutral-950">
+      <div className="flex h-[220px] items-center justify-center border-b border-zinc-800 bg-black">
+        {imageUrl && !imageFailed ? (
+          <img
+            src={imageUrl}
+            alt={item.imageId || "Analyzed upload"}
+            className="h-full w-full object-cover"
+            onError={() => setImageFailed(true)}
+          />
+        ) : (
+          <span className="px-6 text-center text-sm text-zinc-600">
+            Image unavailable
+          </span>
+        )}
+      </div>
+
+      <div className="space-y-4 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-zinc-100">
+              {item.imageId || "Untitled upload"}
+            </p>
+            <p className="mt-1 text-xs text-zinc-500">
+              {formatUploadDate(item.createdAt)}
+            </p>
+          </div>
+          <span className="shrink-0 rounded-full border border-emerald-900/70 bg-emerald-950/30 px-2.5 py-1 text-xs font-medium text-emerald-300">
+            {item.status || "UNKNOWN"}
+          </span>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {topLabels.length > 0 ? (
+            topLabels.map((label) => (
+              <span
+                key={`${item.imageId}-${label.name}`}
+                className="rounded-full border border-zinc-800 bg-black px-2.5 py-1 text-xs text-zinc-300"
+              >
+                {label.name} {label.confidence.toFixed(1)}%
+              </span>
+            ))
+          ) : (
+            <span className="text-sm text-zinc-600">No labels</span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <div className="rounded-xl border border-zinc-800 bg-black p-3">
+            <p className="text-xs text-zinc-500">Labels</p>
+            <p className="mt-1 font-semibold text-zinc-100">{labels.length}</p>
+          </div>
+          <div className="rounded-xl border border-zinc-800 bg-black p-3">
+            <p className="text-xs text-zinc-500">Faces</p>
+            <p className="mt-1 font-semibold text-zinc-100">{faces.length}</p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() => onViewResult(item)}
+          className="inline-flex h-10 w-full items-center justify-center rounded-xl bg-white px-4 text-sm font-semibold text-black transition hover:bg-zinc-200"
+        >
+          View Result
+        </button>
+      </div>
+    </article>
+  );
+}
+
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState<ActiveTab>("upload");
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [result, setResult] = useState<ResultResponse | null>(null);
+  const [resultImageFailed, setResultImageFailed] = useState(false);
   const [pastUploads, setPastUploads] = useState<ResultResponse[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyMessage, setHistoryMessage] = useState("");
@@ -300,6 +389,7 @@ export default function HomePage() {
 
     setFile(selectedFile);
     setResult(null);
+    setResultImageFailed(false);
     setMessage("");
     setDebugInfo("");
     setPreviewUrl(URL.createObjectURL(selectedFile));
@@ -379,6 +469,7 @@ export default function HomePage() {
   }
 
   function handleViewPastUpload(item: ResultResponse) {
+    setResultImageFailed(false);
     setResult(item);
     setMessage("");
     setDebugInfo("");
@@ -401,6 +492,7 @@ export default function HomePage() {
     try {
       setLoading(true);
       setResult(null);
+      setResultImageFailed(false);
       setDebugInfo("");
 
       console.log("Selected file:", {
@@ -467,6 +559,7 @@ export default function HomePage() {
       console.log("faces with bounding boxes", finalResult.faces || []);
 
       setResult(finalResult);
+      setResultImageFailed(false);
       setMessage("Image analyzed successfully.");
     } catch (error) {
       console.error(error);
@@ -500,6 +593,7 @@ export default function HomePage() {
   const isError = Boolean(message && !loading && !result);
   const buttonLabel = loading ? "Analyzing Image..." : "Analyze Image";
   const isAnalyzeDisabled = loading || !file;
+  const resultImageUrl = getDisplayImageUrl(result);
 
   return (
     <main className="min-h-screen bg-black text-white">
@@ -666,11 +760,12 @@ export default function HomePage() {
                   <div className="space-y-4">
                     <div className="text-center">
                       <div className="relative inline-block w-full overflow-hidden rounded-2xl border border-zinc-800 bg-black">
-                        {result.imageUrl ? (
+                        {resultImageUrl && !resultImageFailed ? (
                           <img
-                            src={result.imageUrl}
+                            src={resultImageUrl}
                             alt="Analyzed image"
                             className="block h-auto w-full object-contain"
+                            onError={() => setResultImageFailed(true)}
                           />
                         ) : (
                           <div className="flex h-80 items-center justify-center px-8 text-center text-sm text-zinc-600">
@@ -678,7 +773,7 @@ export default function HomePage() {
                           </div>
                         )}
 
-                        {boundingBoxes.map((item, index) => {
+                        {resultImageUrl && !resultImageFailed && boundingBoxes.map((item, index) => {
                           const color =
                             labelColors[item.labelIndex % labelColors.length];
 
@@ -832,88 +927,13 @@ export default function HomePage() {
               </div>
             ) : (
               <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {pastUploads.map((item) => {
-                  const labels = item.labels || [];
-                  const faces = item.faces || [];
-                  const topLabels = getTopLabels(labels);
-
-                  return (
-                    <article
-                      key={item.imageId}
-                      className="overflow-hidden rounded-2xl border border-zinc-800 bg-neutral-950"
-                    >
-                      <div className="flex h-48 items-center justify-center border-b border-zinc-800 bg-black">
-                        {item.imageUrl ? (
-                          <img
-                            src={item.imageUrl}
-                            alt={item.imageId}
-                            className="h-full w-full object-contain"
-                          />
-                        ) : (
-                          <span className="px-6 text-center text-sm text-zinc-600">
-                            Image unavailable
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="space-y-4 p-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-medium text-zinc-100">
-                              {item.imageId}
-                            </p>
-                            <p className="mt-1 text-xs text-zinc-500">
-                              {formatUploadDate(item.createdAt)}
-                            </p>
-                          </div>
-                          <span className="shrink-0 rounded-full border border-emerald-900/70 bg-emerald-950/30 px-2.5 py-1 text-xs font-medium text-emerald-300">
-                            {item.status || "UNKNOWN"}
-                          </span>
-                        </div>
-
-                        <div className="flex flex-wrap gap-2">
-                          {topLabels.length > 0 ? (
-                            topLabels.map((label) => (
-                              <span
-                                key={`${item.imageId}-${label.name}`}
-                                className="rounded-full border border-zinc-800 bg-black px-2.5 py-1 text-xs text-zinc-300"
-                              >
-                                {label.name} {label.confidence.toFixed(1)}%
-                              </span>
-                            ))
-                          ) : (
-                            <span className="text-sm text-zinc-600">
-                              No labels
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3 text-sm">
-                          <div className="rounded-xl border border-zinc-800 bg-black p-3">
-                            <p className="text-xs text-zinc-500">Labels</p>
-                            <p className="mt-1 font-semibold text-zinc-100">
-                              {labels.length}
-                            </p>
-                          </div>
-                          <div className="rounded-xl border border-zinc-800 bg-black p-3">
-                            <p className="text-xs text-zinc-500">Faces</p>
-                            <p className="mt-1 font-semibold text-zinc-100">
-                              {faces.length}
-                            </p>
-                          </div>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => handleViewPastUpload(item)}
-                          className="inline-flex h-10 w-full items-center justify-center rounded-xl bg-white px-4 text-sm font-semibold text-black transition hover:bg-zinc-200"
-                        >
-                          View Result
-                        </button>
-                      </div>
-                    </article>
-                  );
-                })}
+                {pastUploads.map((item) => (
+                  <PastUploadCard
+                    key={item.imageId}
+                    item={item}
+                    onViewResult={handleViewPastUpload}
+                  />
+                ))}
               </div>
             )}
           </section>
