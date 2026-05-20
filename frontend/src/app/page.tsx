@@ -1,11 +1,26 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+
+type BoundingBox = {
+  Left?: number;
+  Top?: number;
+  Width?: number;
+  Height?: number;
+};
+
+type LabelInstance = {
+  BoundingBox?: BoundingBox;
+  Confidence?: number | string;
+};
 
 type LabelResult = {
-  name: string;
-  confidence: string;
+  name?: string;
+  Name?: string;
+  confidence?: string;
+  Confidence?: number | string;
+  Instances?: LabelInstance[];
+  Categories?: { Name?: string }[];
 };
 
 type ResultResponse = {
@@ -24,24 +39,102 @@ type UploadUrlResponse = {
   expiresIn: number;
 };
 
+type ActiveTab = "upload" | "past";
+type LabelType = "Object" | "Person" | "Scene" | "General";
+type BoundingBoxLabel = {
+  name: string;
+  confidence: number;
+  box: Required<BoundingBox>;
+  labelIndex: number;
+};
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL;
 
-const steps = [
-  "Generate presigned URL",
-  "Upload image to S3",
-  "Process with Rekognition",
-  "Fetch labels from DynamoDB",
+const labelColors = [
+  "border-emerald-400",
+  "border-blue-400",
+  "border-yellow-400",
+  "border-pink-400",
+  "border-purple-400",
+  "border-orange-400",
 ];
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getLabelName(label: LabelResult) {
+  return label.name || label.Name || "Unknown";
+}
+
+function getConfidence(label: LabelResult) {
+  const value = label.confidence ?? label.Confidence ?? 0;
+  const numberValue = Number(value);
+
+  if (!Number.isFinite(numberValue)) {
+    return 0;
+  }
+
+  return Math.min(Math.max(numberValue, 0), 100);
+}
+
+function getLabelType(label: LabelResult): LabelType {
+  const name = getLabelName(label).toLowerCase();
+  const categoryNames = label.Categories?.map((category) =>
+    category.Name?.toLowerCase()
+  ).filter((category): category is string => Boolean(category));
+
+  if (name === "person" || categoryNames?.includes("person")) {
+    return "Person";
+  }
+
+  if (label.Instances?.some((instance) => instance.BoundingBox)) {
+    return "Object";
+  }
+
+  if (
+    categoryNames?.some((category) =>
+      ["scene", "landscape", "environment"].includes(category)
+    )
+  ) {
+    return "Scene";
+  }
+
+  return "General";
+}
+
+function hasBoundingBox(instance: LabelInstance) {
+  const box = instance.BoundingBox;
+
+  return (
+    typeof box?.Left === "number" &&
+    typeof box.Top === "number" &&
+    typeof box.Width === "number" &&
+    typeof box.Height === "number"
+  );
+}
+
+function getBoundingBoxLabels(labels: LabelResult[]): BoundingBoxLabel[] {
+  return labels.flatMap((label, labelIndex) =>
+    (label.Instances || []).filter(hasBoundingBox).map((instance) => ({
+      name: getLabelName(label),
+      confidence: getConfidence({
+        confidence: String(instance.Confidence ?? label.Confidence ?? label.confidence ?? 0),
+      }),
+      box: instance.BoundingBox as Required<BoundingBox>,
+      labelIndex,
+    }))
+  );
+}
+
 export default function HomePage() {
+  const [activeTab, setActiveTab] = useState<ActiveTab>("upload");
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [result, setResult] = useState<ResultResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
-  const [activeStep, setActiveStep] = useState(-1);
   const [debugInfo, setDebugInfo] = useState("");
-  const router = useRouter();
 
   useEffect(() => {
     return () => {
@@ -49,14 +142,7 @@ export default function HomePage() {
     };
   }, [previewUrl]);
 
-  function sleep(ms: number) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
-    const selectedFile = event.target.files?.[0];
-    if (!selectedFile) return;
-
+  function selectFile(selectedFile: File) {
     const allowedTypes = ["image/jpeg", "image/png"];
 
     if (!allowedTypes.includes(selectedFile.type)) {
@@ -66,20 +152,36 @@ export default function HomePage() {
       return;
     }
 
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+    }
+
     setFile(selectedFile);
     setResult(null);
     setMessage("");
     setDebugInfo("");
-    setActiveStep(-1);
+    setPreviewUrl(URL.createObjectURL(selectedFile));
+  }
 
-    const localPreviewUrl = URL.createObjectURL(selectedFile);
-    setPreviewUrl(localPreviewUrl);
+  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const selectedFile = event.target.files?.[0];
+    if (!selectedFile) return;
+
+    selectFile(selectedFile);
+  }
+
+  function handleDrop(event: React.DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+
+    const selectedFile = event.dataTransfer.files?.[0];
+    if (!selectedFile) return;
+
+    selectFile(selectedFile);
   }
 
   async function getResultWithRetry(imageId: string) {
     for (let attempt = 1; attempt <= 6; attempt++) {
-      setActiveStep(3);
-      setMessage(`Fetching Rekognition result... attempt ${attempt}/6`);
+      setMessage(`Analyzing image... ${attempt}/6`);
 
       const resultResponse = await fetch(`${API_URL}/results/${imageId}`, {
         method: "GET",
@@ -123,8 +225,7 @@ export default function HomePage() {
         size: file.size,
       });
 
-      setActiveStep(0);
-      setMessage("Generating secure S3 upload URL...");
+      setMessage("Preparing secure upload...");
 
       const uploadUrlResponse = await fetch(`${API_URL}/upload-url`, {
         method: "POST",
@@ -147,8 +248,7 @@ export default function HomePage() {
 
       const uploadData = JSON.parse(uploadUrlText) as UploadUrlResponse;
 
-      setActiveStep(1);
-      setMessage("Uploading image directly to Amazon S3...");
+      setMessage("Uploading image...");
 
       const s3UploadResponse = await fetch(uploadData.uploadUrl, {
         method: "PUT",
@@ -168,18 +268,14 @@ export default function HomePage() {
         );
       }
 
-      setActiveStep(2);
-      setMessage("Image uploaded. Amazon Rekognition is analyzing it...");
+      setMessage("Image uploaded. Analyzing with Rekognition...");
 
       await sleep(3000);
 
       const finalResult = await getResultWithRetry(uploadData.imageId);
 
       setResult(finalResult);
-      setActiveStep(4);
-      setMessage("Image labels generated successfully.");
-
-      router.push(`/results/${encodeURIComponent(uploadData.imageId)}`);
+      setMessage("Image analyzed successfully.");
     } catch (error) {
       console.error(error);
       setMessage(
@@ -190,260 +286,298 @@ export default function HomePage() {
     }
   }
 
+  const boundingBoxes = useMemo(
+    () => (result ? getBoundingBoxLabels(result.labels) : []),
+    [result]
+  );
+
+  const generalLabels = useMemo(() => {
+    if (!result) return [];
+
+    return result.labels.filter(
+      (label) => !label.Instances?.some(hasBoundingBox)
+    );
+  }, [result]);
+
+  const isError = Boolean(message && !loading && !result);
+  const buttonLabel = loading ? "Analyzing Image..." : "Analyze Image";
+
   return (
-    <main className="min-h-screen overflow-hidden bg-[#020617] text-white">
-      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_top_left,#1d4ed833,transparent_35%),radial-gradient(circle_at_top_right,#0ea5e933,transparent_35%)]" />
+    <main className="min-h-screen bg-black text-white">
+      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-black/85 backdrop-blur">
+        <nav className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6">
+          <button
+            type="button"
+            onClick={() => setActiveTab("upload")}
+            className="text-left text-sm font-semibold tracking-tight text-white"
+          >
+            Image Labels Generator
+          </button>
 
-      <section className="relative mx-auto flex max-w-7xl flex-col gap-10 px-6 py-10 md:py-14">
-        <div className="mx-auto max-w-3xl text-center">
-          <div className="mx-auto mb-5 inline-flex rounded-full border border-blue-400/30 bg-blue-500/10 px-4 py-2 text-xs font-medium uppercase tracking-[0.25em] text-blue-300">
-            AWS Rekognition Serverless Project
+          <div className="flex rounded-full border border-zinc-800 bg-zinc-950 p-1 text-sm">
+            {[
+              { id: "upload", label: "Upload" },
+              { id: "past", label: "Past Uploads" },
+            ].map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setActiveTab(item.id as ActiveTab)}
+                className={`rounded-full px-4 py-2 transition ${
+                  activeTab === item.id
+                    ? "bg-white text-black"
+                    : "text-zinc-400 hover:text-white"
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
           </div>
+        </nav>
+      </div>
 
-          <h1 className="text-4xl font-bold tracking-tight md:text-6xl">
+      <section className="mx-auto max-w-6xl px-4 py-10 sm:px-6 lg:py-14">
+        <div className="max-w-3xl">
+          <h1 className="text-4xl font-semibold tracking-tight text-white md:text-6xl">
             Image Labels Generator
           </h1>
-
-          <p className="mx-auto mt-5 max-w-2xl text-sm leading-7 text-slate-300 md:text-base">
-            Upload an image from the browser, store it in Amazon S3, analyze it
-            using Amazon Rekognition, save labels in DynamoDB, and display the
-            result in a clean Next.js interface.
-          </p>
-
-          <div className="mt-6 flex flex-wrap justify-center gap-2 text-xs text-slate-300">
-            {["Next.js", "API Gateway", "Lambda", "S3", "Rekognition", "DynamoDB"].map(
-              (item) => (
-                <span
-                  key={item}
-                  className="rounded-full border border-white/10 bg-white/5 px-3 py-1"
-                >
-                  {item}
-                </span>
-              )
-            )}
-          </div>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-[1.05fr_0.95fr]">
-          <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl backdrop-blur md:p-7">
-            <div className="mb-6 flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-semibold">Upload Image</h2>
-                <p className="mt-1 text-sm text-slate-400">
-                  Supports JPG, JPEG, and PNG.
-                </p>
-              </div>
-
-              <div className="rounded-2xl bg-blue-500/10 px-4 py-2 text-xs font-medium text-blue-300">
-                Private S3 Upload
-              </div>
-            </div>
-
-            <div className="rounded-2xl border border-dashed border-blue-400/30 bg-slate-950/70 p-5">
-              <label className="block text-sm font-medium text-slate-300">
-                Select image
-              </label>
-
-              <input
-                type="file"
-                accept="image/png,image/jpeg"
-                onChange={handleFileChange}
-                className="mt-4 block w-full cursor-pointer rounded-xl border border-slate-700 bg-slate-950 text-sm text-slate-300 file:mr-4 file:border-0 file:bg-blue-600 file:px-4 file:py-3 file:text-white hover:file:bg-blue-500"
-              />
-
-              {file && (
-                <div className="mt-4 grid gap-3 rounded-xl border border-white/10 bg-slate-900/80 p-4 text-sm text-slate-400 md:grid-cols-3">
-                  <div>
-                    <p className="text-xs uppercase text-slate-500">File</p>
-                    <p className="mt-1 truncate text-slate-200">{file.name}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs uppercase text-slate-500">Type</p>
-                    <p className="mt-1 text-slate-200">{file.type}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs uppercase text-slate-500">Size</p>
-                    <p className="mt-1 text-slate-200">
-                      {(file.size / 1024).toFixed(2)} KB
-                    </p>
-                  </div>
+        {activeTab === "upload" ? (
+          <div className="mt-10 space-y-6">
+            <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:p-6">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <h2 className="text-xl font-semibold tracking-tight">
+                    Upload Image
+                  </h2>
+                  <p className="mt-1 text-sm text-zinc-500">
+                    Choose a JPG or PNG image to analyze.
+                  </p>
                 </div>
-              )}
-            </div>
-
-            {previewUrl && (
-              <div className="mt-5 overflow-hidden rounded-2xl border border-white/10 bg-slate-950/70">
-                <div className="border-b border-white/10 px-4 py-3 text-sm text-slate-300">
-                  Local Preview
-                </div>
-                <img
-                  src={previewUrl}
-                  alt="Selected preview"
-                  className="h-80 w-full object-contain p-4"
-                />
-              </div>
-            )}
-
-            <button
-              onClick={handleUpload}
-              disabled={loading || !file}
-              className="mt-5 w-full rounded-2xl bg-blue-600 px-5 py-4 font-semibold text-white shadow-lg shadow-blue-950/40 transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-700"
-            >
-              {loading ? "Processing Image..." : "Upload and Generate Labels"}
-            </button>
-
-            <div className="mt-5 rounded-2xl border border-white/10 bg-slate-950/60 p-4">
-              <p className="mb-3 text-sm font-medium text-slate-300">
-                Processing Flow
-              </p>
-
-              <div className="space-y-3">
-                {steps.map((step, index) => {
-                  const isDone = activeStep > index;
-                  const isActive = activeStep === index;
-
-                  return (
-                    <div
-                      key={step}
-                      className="flex items-center gap-3 text-sm text-slate-400"
-                    >
-                      <div
-                        className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs ${
-                          isDone
-                            ? "border-emerald-400 bg-emerald-500/20 text-emerald-300"
-                            : isActive
-                            ? "border-blue-400 bg-blue-500/20 text-blue-300"
-                            : "border-slate-700 bg-slate-900 text-slate-500"
-                        }`}
-                      >
-                        {isDone ? "✓" : index + 1}
-                      </div>
-
-                      <span
-                        className={
-                          isActive
-                            ? "text-blue-300"
-                            : isDone
-                            ? "text-emerald-300"
-                            : ""
-                        }
-                      >
-                        {step}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {message && (
-              <p className="mt-5 rounded-2xl border border-white/10 bg-slate-950/70 p-4 text-sm text-slate-300">
-                {message}
-              </p>
-            )}
-
-            {debugInfo && (
-              <pre className="mt-5 max-h-72 overflow-auto rounded-2xl border border-red-500/30 bg-red-950/40 p-4 text-xs text-red-100">
-                {debugInfo}
-              </pre>
-            )}
-          </div>
-
-          <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-5 shadow-2xl backdrop-blur md:p-7">
-            <div className="mb-6 flex items-center justify-between gap-4">
-              <div>
-                <h2 className="text-xl font-semibold">Detected Labels</h2>
-                <p className="mt-1 text-sm text-slate-400">
-                  Results returned from DynamoDB.
-                </p>
+                {file && (
+                  <p className="max-w-full truncate text-sm text-zinc-400 sm:max-w-xs">
+                    {file.name}
+                  </p>
+                )}
               </div>
 
-              {result && (
-                <div className="rounded-2xl bg-emerald-500/10 px-4 py-2 text-xs font-medium text-emerald-300">
-                  COMPLETED
-                </div>
-              )}
-            </div>
-
-            {!result && (
-              <div className="flex h-[520px] flex-col items-center justify-center rounded-2xl border border-white/10 bg-slate-950/70 p-8 text-center">
-                <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-3xl bg-blue-500/10 text-2xl">
-                  ✨
-                </div>
-                <h3 className="text-lg font-semibold">No result yet</h3>
-                <p className="mt-2 max-w-sm text-sm leading-6 text-slate-400">
-                  Select an image and run the pipeline. The labels, confidence
-                  scores, image ID, and S3 object key will appear here.
-                </p>
-              </div>
-            )}
-
-            {result && (
-              <div className="space-y-5">
-                <div className="overflow-hidden rounded-2xl border border-white/10 bg-slate-950/70">
-                  <div className="border-b border-white/10 px-4 py-3 text-sm text-slate-300">
-                    Processed Image
-                  </div>
-                  <img
-                    src={result.imageUrl}
-                    alt="Processed image"
-                    className="h-80 w-full object-contain p-4"
+              <div className="mt-6 grid gap-5 lg:grid-cols-[1fr_0.9fr]">
+                <label
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={handleDrop}
+                  className="group flex min-h-80 cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-700 bg-neutral-950 p-8 text-center transition hover:border-zinc-500"
+                >
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg"
+                    onChange={handleFileChange}
+                    className="sr-only"
                   />
-                </div>
 
-                <div className="space-y-3">
-                  {result.labels.map((label) => {
-                    const confidence = Number(label.confidence);
-                    const confidenceWidth = Math.min(
-                      Math.max(confidence, 0),
-                      100
-                    );
-
-                    return (
-                      <div
-                        key={label.name}
-                        className="rounded-2xl border border-white/10 bg-slate-950/70 p-4"
-                      >
-                        <div className="mb-2 flex items-center justify-between gap-4">
-                          <span className="font-medium text-slate-100">
-                            {label.name}
-                          </span>
-                          <span className="text-sm text-blue-300">
-                            {label.confidence}%
-                          </span>
-                        </div>
-
-                        <div className="h-2 overflow-hidden rounded-full bg-slate-800">
-                          <div
-                            className="h-full rounded-full bg-blue-500"
-                            style={{ width: `${confidenceWidth}%` }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="rounded-2xl border border-white/10 bg-slate-950/80 p-4 text-xs text-slate-500">
-                  <p>
-                    <span className="text-slate-300">Image ID:</span>{" "}
-                    {result.imageId}
+                  <div className="flex h-14 w-14 items-center justify-center rounded-full border border-zinc-800 bg-black text-2xl text-zinc-300 transition group-hover:border-zinc-600 group-hover:text-white">
+                    +
+                  </div>
+                  <p className="mt-5 text-lg font-medium text-zinc-100">
+                    Drag and drop an image
                   </p>
-                  <p className="mt-1 break-all">
-                    <span className="text-slate-300">Object Key:</span>{" "}
-                    {result.objectKey}
+                  <p className="mt-2 text-sm leading-6 text-zinc-500">
+                    Browse from your device or drop a file here.
                   </p>
-                  {result.createdAt && (
-                    <p className="mt-1">
-                      <span className="text-slate-300">Created At:</span>{" "}
-                      {result.createdAt}
-                    </p>
+                  <span className="mt-6 rounded-full border border-zinc-800 px-4 py-2 text-sm font-medium text-zinc-300">
+                    Select Image
+                  </span>
+                </label>
+
+                <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-neutral-950">
+                  {previewUrl ? (
+                    <img
+                      src={previewUrl}
+                      alt="Selected preview"
+                      className="h-80 w-full object-contain p-4"
+                    />
+                  ) : (
+                    <div className="flex h-80 items-center justify-center px-8 text-center text-sm text-zinc-600">
+                      Image preview appears here after selection.
+                    </div>
                   )}
                 </div>
               </div>
+
+              <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-center">
+                <button
+                  onClick={handleUpload}
+                  disabled={loading || !file}
+                  className="inline-flex h-12 items-center justify-center rounded-xl bg-white px-6 text-sm font-semibold text-black transition hover:bg-zinc-200 disabled:cursor-not-allowed disabled:bg-zinc-800 disabled:text-zinc-500"
+                >
+                  {buttonLabel}
+                </button>
+
+                {loading && (
+                  <div className="flex items-center gap-3 text-sm text-zinc-400">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+                    {message}
+                  </div>
+                )}
+              </div>
+
+              {message && !loading && (
+                <p
+                  className={`mt-5 rounded-xl border px-4 py-3 text-sm ${
+                    isError
+                      ? "border-red-900/60 bg-red-950/30 text-red-200"
+                      : "border-emerald-900/60 bg-emerald-950/20 text-emerald-200"
+                  }`}
+                >
+                  {message}
+                </p>
+              )}
+
+              {debugInfo && (
+                <pre className="mt-5 max-h-72 overflow-auto rounded-xl border border-red-900/60 bg-red-950/30 p-4 text-xs text-red-100">
+                  {debugInfo}
+                </pre>
+              )}
+            </section>
+
+            {result && (
+              <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:p-6">
+                <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <h2 className="text-xl font-semibold tracking-tight">
+                      Analysis Result
+                    </h2>
+                    <p className="mt-1 text-sm text-zinc-500">
+                      Rekognition results from the uploaded image.
+                    </p>
+                  </div>
+                  <span className="w-fit rounded-full border border-emerald-900/70 bg-emerald-950/30 px-3 py-1 text-xs font-medium text-emerald-300">
+                    Completed
+                  </span>
+                </div>
+
+                <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+                  <div className="space-y-4">
+                    <div className="text-center">
+                      <div className="relative inline-block w-full overflow-hidden rounded-2xl border border-zinc-800 bg-black">
+                        <img
+                          src={result.imageUrl}
+                          alt="Analyzed image"
+                          className="block h-auto w-full object-contain"
+                        />
+
+                        {boundingBoxes.map((item, index) => {
+                          const color =
+                            labelColors[item.labelIndex % labelColors.length];
+
+                          return (
+                            <div
+                              key={`${item.name}-${index}`}
+                              className={`pointer-events-none absolute rounded-sm border-2 ${color}`}
+                              style={{
+                                left: `${item.box.Left * 100}%`,
+                                top: `${item.box.Top * 100}%`,
+                                width: `${item.box.Width * 100}%`,
+                                height: `${item.box.Height * 100}%`,
+                              }}
+                            >
+                              <div className="absolute -top-7 left-0 whitespace-nowrap rounded-md border border-zinc-700 bg-black/90 px-2 py-1 text-xs font-medium text-white">
+                                {item.name} {item.confidence.toFixed(1)}%
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {generalLabels.length > 0 && (
+                      <div className="rounded-2xl border border-zinc-800 bg-neutral-950 p-4">
+                        <h3 className="text-sm font-semibold text-zinc-200">
+                          Scene / General Labels
+                        </h3>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {generalLabels.map((label) => (
+                            <span
+                              key={getLabelName(label)}
+                              className="rounded-full border border-zinc-800 bg-black px-3 py-1.5 text-sm text-zinc-300"
+                            >
+                              {getLabelName(label)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <aside className="space-y-4">
+                    <div className="rounded-2xl border border-zinc-800 bg-neutral-950 p-4">
+                      <h3 className="text-sm font-semibold text-zinc-200">
+                        Detected Labels
+                      </h3>
+
+                      {result.labels.length > 0 ? (
+                        <div className="mt-4 space-y-3">
+                          {result.labels.map((label) => {
+                            const confidence = getConfidence(label);
+                            const type = getLabelType(label);
+
+                            return (
+                              <div
+                                key={getLabelName(label)}
+                                className="rounded-xl border border-zinc-800 bg-black p-4"
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <p className="font-medium text-zinc-100">
+                                      {getLabelName(label)}
+                                    </p>
+                                    <p className="mt-1 text-xs text-zinc-500">
+                                      {type}
+                                    </p>
+                                  </div>
+                                  <span className="rounded-full border border-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-300">
+                                    {confidence.toFixed(1)}%
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="mt-4 text-sm text-zinc-500">
+                          No labels were returned for this image.
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="rounded-2xl border border-zinc-800 bg-neutral-950 p-4">
+                      <h3 className="text-sm font-semibold text-zinc-200">
+                        Scene Description
+                      </h3>
+                      <p className="mt-3 text-sm leading-6 text-zinc-500">
+                        Description will be generated from detected labels in
+                        the next phase.
+                      </p>
+                    </div>
+                  </aside>
+                </div>
+              </section>
             )}
           </div>
-        </div>
+        ) : (
+          <section className="mt-10 rounded-2xl border border-zinc-800 bg-zinc-950 p-10 text-center">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-zinc-800 bg-black text-zinc-500">
+              -
+            </div>
+            <h2 className="mt-5 text-xl font-semibold tracking-tight">
+              No past uploads yet
+            </h2>
+            <p className="mx-auto mt-2 max-w-md text-sm leading-6 text-zinc-500">
+              Your analyzed images will appear here after DynamoDB history is
+              connected.
+            </p>
+          </section>
+        )}
       </section>
     </main>
   );
