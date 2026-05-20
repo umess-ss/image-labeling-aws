@@ -34,7 +34,6 @@ const steps = [
 ];
 
 export default function HomePage() {
-  const [mounted, setMounted] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState("");
   const [result, setResult] = useState<ResultResponse | null>(null);
@@ -43,10 +42,6 @@ export default function HomePage() {
   const [activeStep, setActiveStep] = useState(-1);
   const [debugInfo, setDebugInfo] = useState("");
   const router = useRouter();
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -193,10 +188,6 @@ export default function HomePage() {
     } finally {
       setLoading(false);
     }
-  }
-
-  if (!mounted) {
-    return <main className="min-h-screen bg-slate-950 text-white" />;
   }
 
   return (
