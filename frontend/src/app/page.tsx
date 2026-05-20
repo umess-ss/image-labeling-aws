@@ -271,6 +271,178 @@ function getDisplayImageUrl(item?: ResultResponse | null) {
   return item?.presignedImageUrl || item?.imageUrl || "";
 }
 
+function normalizeLabelName(value?: string) {
+  return value?.toLowerCase().trim() || "";
+}
+
+function hasAnyLabel(labelNames: string[], targets: string[]) {
+  const normalizedLabels = labelNames.map(normalizeLabelName);
+
+  return targets.some((target) =>
+    normalizedLabels.includes(normalizeLabelName(target))
+  );
+}
+
+function getLabelInstances(label: LabelResult) {
+  return label.Instances || label.instances || [];
+}
+
+function generateSceneSummary(result?: ResultResponse | null) {
+  if (!result) {
+    return "This image contains general objects and scene labels.";
+  }
+
+  const labels = result.labels || [];
+  const faces = result.faces || [];
+  const labelNames = labels
+    .map((label) => getLabelName(label))
+    .filter((name) => name && name !== "Unknown");
+
+  const personLabel = labels.find((label) => {
+    const name = normalizeLabelName(getLabelName(label));
+    return name === "person" || name === "people" || name === "human";
+  });
+
+  const personInstanceCount = personLabel
+    ? getLabelInstances(personLabel).length
+    : 0;
+  const faceCount = faces.length;
+
+  let personPhrase = "";
+
+  if (personInstanceCount > 0) {
+    personPhrase =
+      personInstanceCount === 1
+        ? "1 person"
+        : `${personInstanceCount} people`;
+  } else if (faceCount > 0) {
+    personPhrase = faceCount === 1 ? "1 person" : `${faceCount} people`;
+  } else if (
+    hasAnyLabel(labelNames, ["Person", "People", "Human", "Face", "Head"])
+  ) {
+    personPhrase = "people";
+  }
+
+  const verb =
+    personPhrase === "people"
+      ? "are"
+      : personPhrase.startsWith("1 person")
+      ? "is"
+      : "are";
+
+  const isPathScene = hasAnyLabel(labelNames, [
+    "Path",
+    "Walkway",
+    "Sidewalk",
+    "Road",
+    "Street",
+  ]);
+
+  const isPavedPathScene = hasAnyLabel(labelNames, [
+    "Floor",
+    "Flagstone",
+    "Pavement",
+  ]);
+
+  const isIndoorScene = hasAnyLabel(labelNames, [
+    "Room",
+    "Indoors",
+    "Furniture",
+    "Chair",
+    "Table",
+  ]);
+
+  const isNatureScene = hasAnyLabel(labelNames, [
+    "Nature",
+    "Plant",
+    "Tree",
+    "Grass",
+    "Mountain",
+    "Outdoors",
+    "Sky",
+  ]);
+
+  const isFoodScene = hasAnyLabel(labelNames, [
+    "Food",
+    "Dish",
+    "Meal",
+    "Plate",
+  ]);
+
+  const isVehicleScene = hasAnyLabel(labelNames, [
+    "Car",
+    "Vehicle",
+    "Road",
+    "Transportation",
+    "Automobile",
+  ]);
+
+  const isPortraitScene = hasAnyLabel(labelNames, [
+    "Portrait",
+    "Face",
+    "Head",
+    "Photography",
+  ]);
+
+  const clothingLabels = labelNames.filter((name) =>
+    ["Pants", "Dress", "Skirt", "Coat", "Jacket", "Shirt", "Clothing"].some(
+      (item) => normalizeLabelName(item) === normalizeLabelName(name)
+    )
+  );
+
+  if (personPhrase && (isPathScene || isPavedPathScene) && isPortraitScene) {
+    return `${personPhrase} ${verb} standing on a walkway or path in an outdoor portrait scene.`;
+  }
+
+  if (personPhrase && (isPathScene || isPavedPathScene)) {
+    return `${personPhrase} ${verb} shown on a walkway or paved path.`;
+  }
+
+  if (personPhrase && isIndoorScene && isPortraitScene) {
+    return `${personPhrase} ${verb} shown in an indoor portrait photo.`;
+  }
+
+  if (personPhrase && isNatureScene) {
+    return `${personPhrase} ${verb} shown in an outdoor nature scene.`;
+  }
+
+  if (personPhrase && isPortraitScene) {
+    return `${personPhrase} ${verb} shown in a portrait-style photo.`;
+  }
+
+  if (isFoodScene) {
+    return "This image shows a food scene with plates and dishes.";
+  }
+
+  if (isVehicleScene) {
+    return "This image shows a vehicle or road-related scene.";
+  }
+
+  if (isNatureScene) {
+    return "This image appears to show an outdoor nature scene.";
+  }
+
+  if (isIndoorScene) {
+    return "This image appears to show an indoor room scene.";
+  }
+
+  if (isPathScene || isPavedPathScene) {
+    return "This image appears to show a walkway, path, or paved surface.";
+  }
+
+  if (clothingLabels.length > 0) {
+    return `This image includes clothing items such as ${clothingLabels
+      .slice(0, 3)
+      .join(", ")}.`;
+  }
+
+  if (labelNames.length > 0) {
+    return `This image contains ${labelNames.slice(0, 4).join(", ")}.`;
+  }
+
+  return "This image contains general objects and scene labels.";
+}
+
 function PastUploadCard({
   item,
   onViewResult,
@@ -283,6 +455,7 @@ function PastUploadCard({
   const labels = item.labels || [];
   const faces = item.faces || [];
   const topLabels = getTopLabels(labels);
+  const sceneSummary = generateSceneSummary(item);
 
   return (
     <article className="overflow-hidden rounded-2xl border border-zinc-800 bg-neutral-950">
@@ -330,6 +503,10 @@ function PastUploadCard({
             <span className="text-sm text-zinc-600">No labels</span>
           )}
         </div>
+
+        <p className="line-clamp-2 text-sm leading-6 text-zinc-500">
+          {sceneSummary}
+        </p>
 
         <div className="grid grid-cols-2 gap-3 text-sm">
           <div className="rounded-xl border border-zinc-800 bg-black p-3">
@@ -411,22 +588,36 @@ export default function HomePage() {
     selectFile(selectedFile);
   }
 
-  async function getResultWithRetry(imageId: string) {
-    for (let attempt = 1; attempt <= 6; attempt++) {
-      setMessage(`Analyzing image... ${attempt}/6`);
+  async function getResultWithRetry(
+    imageId: string,
+    retries = 20,
+    delay = 1500
+  ) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      setMessage(
+        `Analyzing image with Rekognition... This can take a few seconds. (${attempt}/${retries})`
+      );
 
-      const resultResponse = await fetch(`${API_BASE_URL}/results/${imageId}`, {
+      const response = await fetch(`${API_BASE_URL}/results/${imageId}`, {
         method: "GET",
       });
 
-      const resultData = await resultResponse.json();
+      if (response.ok) {
+        const data = await response.json();
+        const resultData = (data.item || data) as ResultResponse;
 
-      if (resultResponse.ok && resultData.status === "COMPLETED") {
-        return resultData as ResultResponse;
+        if (!resultData.status || resultData.status === "COMPLETED") {
+          return resultData;
+        }
       }
 
-      if (attempt < 6) {
-        await sleep(2000);
+      if (!response.ok && response.status !== 404) {
+        const errorText = await response.text();
+        throw new Error(errorText || "Failed to fetch result");
+      }
+
+      if (attempt < retries) {
+        await sleep(delay);
       }
     }
 
@@ -544,7 +735,9 @@ export default function HomePage() {
         );
       }
 
-      setMessage("Image uploaded. Analyzing with Rekognition...");
+      setMessage(
+        "Analyzing image with Rekognition... This can take a few seconds."
+      );
 
       await sleep(3000);
 
@@ -819,6 +1012,15 @@ export default function HomePage() {
                   <aside className="space-y-4">
                     <div className="rounded-2xl border border-zinc-800 bg-neutral-950 p-4">
                       <h3 className="text-sm font-semibold text-zinc-200">
+                        Scene Summary
+                      </h3>
+                      <p className="mt-3 text-sm leading-6 text-zinc-500">
+                        {generateSceneSummary(result)}
+                      </p>
+                    </div>
+
+                    <div className="rounded-2xl border border-zinc-800 bg-neutral-950 p-4">
+                      <h3 className="text-sm font-semibold text-zinc-200">
                         Detected Labels
                       </h3>
 
@@ -855,16 +1057,6 @@ export default function HomePage() {
                           No labels were returned for this image.
                         </p>
                       )}
-                    </div>
-
-                    <div className="rounded-2xl border border-zinc-800 bg-neutral-950 p-4">
-                      <h3 className="text-sm font-semibold text-zinc-200">
-                        Scene Description
-                      </h3>
-                      <p className="mt-3 text-sm leading-6 text-zinc-500">
-                        Description will be generated from detected labels in
-                        the next phase.
-                      </p>
                     </div>
                   </aside>
                 </div>
