@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { LABEL_COLORS } from "../lib/config";
+import { downloadResultCsv, downloadResultJson } from "../lib/download-utils";
 import {
   generateSceneSummary,
   getBoundingBoxLabels,
@@ -41,7 +42,7 @@ export function ResultSection({ result }: ResultSectionProps) {
 
   return (
     <section className="rounded-2xl border border-zinc-800 bg-zinc-950 p-4 sm:p-6">
-      <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h2 className="text-xl font-semibold tracking-tight">
             Analysis Result
@@ -50,9 +51,25 @@ export function ResultSection({ result }: ResultSectionProps) {
             Rekognition results from the uploaded image.
           </p>
         </div>
-        <span className="w-fit rounded-full border border-emerald-900/70 bg-emerald-950/30 px-3 py-1 text-xs font-medium text-emerald-300">
-          Completed
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => downloadResultJson(result)}
+            className="inline-flex h-9 items-center justify-center rounded-xl border border-zinc-700 px-3 text-xs font-medium text-zinc-200 transition hover:border-zinc-500 hover:bg-neutral-950"
+          >
+            Download JSON
+          </button>
+          <button
+            type="button"
+            onClick={() => downloadResultCsv(result)}
+            className="inline-flex h-9 items-center justify-center rounded-xl border border-zinc-700 px-3 text-xs font-medium text-zinc-200 transition hover:border-zinc-500 hover:bg-neutral-950"
+          >
+            Download CSV
+          </button>
+          <span className="w-fit rounded-full border border-emerald-900/70 bg-emerald-950/30 px-3 py-1 text-xs font-medium text-emerald-300">
+            Completed
+          </span>
+        </div>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
